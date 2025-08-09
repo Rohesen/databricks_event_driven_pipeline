@@ -1,4 +1,4 @@
-# ⚡📈 Incremental Data Load into Delta Table – 🎯 Event Driven (🧠 Databricks + ☁️📦 GCS)
+# 🥫 Incremental Data Load into Delta Table – Event Driven (Databricks + GCS)
 
 ## 📌 Overview
 
