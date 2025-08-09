@@ -1,113 +1,120 @@
-# 🥫 Order Tracking - Event Driven Data Ingestion
+# ⚡📈 Incremental Data Load into Delta Table – 🎯 Event Driven (🧠 Databricks + ☁️📦 GCS)
 
-## 📌 Project Overview
-This project implements an **event-driven data ingestion pipeline** in **Databricks** for processing order tracking files.  
-It automatically triggers workflows upon **file arrival**, stages the incoming data, and performs **SCD Type 1 (upsert) merges** into a Delta Lake target table.
+## 📌 Overview
 
-The workflow consists of two jobs:
-1. **Orders Stage Load** - Reads raw files from Databricks Volumes and loads them into a staging Delta table.
-2. **Orders Target Merge** - Performs an incremental upsert (SCD1) from the staging table into the target Delta table.
+This project implements an **incremental data loading pipeline** from **Google Cloud Storage (GCS)** into **Delta Tables** on Databricks, using an **event-driven file arrival trigger**.
 
----
+The workflow automatically:
 
-## 🛠 Tech Stack
-- **Google Cloud Storage (GCS)** – Raw file storage
-- **Databricks** – Data engineering & orchestration
-- **PySpark** – Distributed data processing
-- **Delta Lake** – ACID-compliant storage format
-- **Databricks Workflows** – Job scheduling & triggers
-- **GitHub** – Version control for notebooks
+1. **Detects new files** uploaded by clients into the GCS `source` folder.
+2. **Loads** them into a **stage Delta table**.
+3. **Merges (UPSERT)** them into the target Delta table.
+4. **Archives** processed files.
 
 ---
 
-## 📂 Project Structure
-```plaintext
-.
-├── notebooks/
-│   ├── orders_stage.py       # Stage job: Load raw files → staging Delta table
-│   ├── orders_target.py      # Target job: Merge from staging → target Delta table
-├── README.md
+## 📊 Workflow Diagram
 
-````
+![Event_data_ingestion_architecture_diagram3](/Event_data_ingestion_architecture_diagram3.jpg)
 
 ---
 
-## ⚙️ Setup Instructions
+## 🗂 Google Cloud Storage Structure
 
-### 1️⃣ Clone the repository
+* **Bucket Name:** `incremental_load_dataaa`
+* **Folders:**
 
-```bash
-git clone https://github.com/<your-username>/<repo-name>.git
-cd <repo-name>
-```
+  * `source/` → New client-uploaded CSV files.
+  * `archive/` → Processed files moved here after ingestion.
 
-### 2️⃣ Connect GitHub with Databricks
-
-1. Go to **User Settings → Git Integration** in Databricks.
-2. Connect with your GitHub account and configure the repository.
-
-### 3️⃣ Create Databricks Volumes
-
-```sql
-CREATE CATALOG IF NOT EXISTS incremental_load;
-CREATE SCHEMA IF NOT EXISTS incremental_load.default;
-```
-
-### 4️⃣ Upload Sample Files
-
-Place daily order tracking CSV files into:
+Example:
 
 ```
-/Volumes/incremental_load/default/orders_data/
+incremental_load_dataaa/
+│
+├── source/
+│   ├── file1.csv
+│   ├── file2.csv
+│
+└── archive/
+    ├── file1.csv
+    ├── file2.csv
 ```
 
 ---
 
-## 📜 Step-by-Step Job Execution Flow
+## ⚙ Databricks Setup
 
-### **1. File Arrival**
+1. **External Location**
 
-* A new CSV file arrives in `/Volumes/incremental_load/default/orders_data/`
-* Databricks Workflow **triggers automatically**.
+   ```
+   for_incremental_load → gs://incremental_load_dataaa/
+   ```
 
-### **2. Orders Stage Load Job**
+2. **Unity Catalog & Volume**
 
-* Reads CSV from source directory.
-* Writes to **staging Delta table**: `incremental_load.default.orders_stage`.
-* Moves processed files to archive directory.
+   * **Catalog:** `incremental_load`
+   * **Volume Path:** `/Volumes/incremental_load/default/orders_data/`
 
-### **3. Orders Target Merge Job**
+     * `/source/` → mapped to GCS `source/`
+     * `/archive/` → mapped to GCS `archive/`
 
-* Checks if `orders_target` Delta table exists.
+3. **Tables**
 
-  * If **not exists** → Creates target table from staging data.
-  * If **exists** → Performs **SCD1 upsert**:
-
-    * **Update** if `tracking_num` matches.
-    * **Insert** if no match.
-* Target table: `incremental_load.default.orders_target`.
+   * **Stage Table:** `incremental_load.default.orders_stage`
+   * **Target Table:** `incremental_load.default.orders_target`
 
 ---
 
-## 🖼 Architecture Diagram
+## 🔄 Workflow & Version Control
 
-```mermaid
-flowchart LR
-    A[📁 CSV Files in GCS/Databricks Volume] -->|File Arrival Trigger| B[📦 Orders Stage Job]
-    B -->|Write Staging Delta Table| C[(🗄 orders_stage Delta Table)]
-    C --> D[⚡ Orders Target Job]
-    D -->|Merge (SCD1)| E[(🗄 orders_target Delta Table)]
-    B -->|Move Processed Files| F[📂 Archive Directory]
+### **Pipeline Name:**
+
+`order_tracking_incremental_load`
+
+* **Trigger:** **File Arrival** in GCS `source/` folder.
+* **Tasks:**
+
+  1. **order\_stage\_load** (Notebook in Git repo) – Reads from `source/`, loads stage table, moves files to `archive/`.
+  2. **order\_target\_load** (Notebook in Git repo) – Performs Delta Lake **UPSERT** into target table.
+
+Both notebooks are stored in a **Git-connected Databricks folder** for version control with GitHub.
+
+---
+
+## 📝 Task 1 – Stage Load (`order_stage_load`)
+
+```python
+source_dir = "/Volumes/incremental_load/default/orders_data/source/"
+target_dir = "/Volumes/incremental_load/default/orders_data/archive/"
+stage_table = "incremental_load.default.orders_stage"
+
+# Read CSV files from source
+df = spark.read.csv(source_dir, header=True, inferSchema=True)
+
+# Overwrite into stage table
+df.write.format("delta").mode("overwrite").saveAsTable(stage_table)
+
+# Move processed files to archive
+files = dbutils.fs.ls(source_dir)
+for file in files:
+    src_path = file.path
+    target_path = target_dir + src_path.split("/")[-1]
+    dbutils.fs.mv(src_path, target_path)
 ```
 
 ---
 
-## 📜 Sample Merge Code (SCD1)
+## 📝 Task 2 – Merge into Target Table (`order_target_load`)
 
 ```python
 from delta.tables import DeltaTable
 from pyspark.sql.utils import AnalysisException
 
+stage_df = spark.read.table("incremental_load.default.orders_stage")
+target_table_name = "incremental_load.default.orders_target"
+
+# Check if target table exists
 try:
     target_table = DeltaTable.forName(spark, target_table_name)
     table_exists = True
@@ -127,46 +134,26 @@ else:
         .execute()
 ```
 
----
 
-## ⚡ Event-Driven Trigger
 
-* The Databricks Workflow is configured to **trigger automatically when a file is uploaded** to the source volume.
-* Job sequence:
+## 🚀 How It Works
 
-  1. **Orders Stage Load**
-  2. **Orders Target Merge**
+1. Client uploads a file (e.g., `file1.csv`) to **GCS** → `source/`.
+2. **Databricks File Arrival Trigger** detects the new file.
+3. **Workflow `order_tracking_incremental_load`** runs automatically:
 
----
-
-## 🧪 Testing
-
-Upload a sample CSV file:
-
-```csv
-tracking_num,order_id,status
-12345,1,Delivered
-67890,2,Shipped
-```
-
-Then run:
-
-```sql
-SELECT * FROM incremental_load.default.orders_target;
-```
+   * **Task 1**: Loads CSV into stage table, moves file to `archive/`.
+   * **Task 2**: Merges staged data into target table (UPSERT).
+4. Data is now available in `orders_target` table for downstream analytics.
 
 ---
 
-## 📌 Notes
+## ✅ Benefits
 
-* Ensure **Unity Catalog write access** to the target schema.
-* For shared clusters, use a **single-user cluster** to avoid JVM attribute restrictions.
-* Handle schema evolution if CSV structure changes.
+* Fully **event-driven** – no manual execution needed.
+* **Version-controlled notebooks** for reproducibility.
+* **Scalable incremental loading** with Delta Lake merge.
+* **Automated archival** of processed files.
 
 ---
-
-## 📜 License
-
-This project is licensed under the MIT License – see the LICENSE file for details.
-
 
